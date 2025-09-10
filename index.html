@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voldemort – Mini Game (Power Cycle + Faster Powers)</title>
+  <style>
+    body{margin:0;background:#111;color:#fff;font-family:sans-serif}
+    #hud{display:flex;gap:12px;align-items:center;justify-content:center;padding:8px}
+    .bar{width:240px;height:16px;background:#333;border-radius:10px;overflow:hidden;box-shadow:inset 0 0 0 1px #000}
+    .fill{height:100%;background:linear-gradient(90deg,#22c55e,#16a34a)}
+    .enemy{background:linear-gradient(90deg,#ef4444,#b91c1c)}
+    #info{font-size:12px;opacity:.85;text-align:center;margin:6px 8px}
+    canvas{display:block;margin:6px auto 10px auto;background:#1b1b1d;border:3px solid #3c3c40;border-radius:12px}
+    #controls{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;padding:8px}
+    .chip{background:#26262b;border:1px solid #3a3a40;border-radius:999px;padding:6px 10px;cursor:pointer}
+    .chip.active{outline:2px solid #e11d48}
+    button{background:#2a2a30;color:#fff;border:1px solid #3a3a40;border-radius:10px;padding:6px 12px;cursor:pointer}
+    #startBtn{background:#0e7490;border-color:#155e75}
+  </style>
+</head>
+<body>
+  <div id="info">Pick a power first. Click <b>Start</b> to begin. Move with ← ↑ ↓ → (or WASD) <i>or</i> click on the canvas to run toward the click. Press <b>Space</b> to use your power. Press <b>0</b> to cycle through powers.</div>
+  <div id="hud">
+    <div class="bar"><div id="hpYou" class="fill" style="width:100%"></div></div>
+    <div class="bar"><div id="hpE" class="fill enemy" style="width:100%"></div></div>
+  </div>
+  <div id="controls">
+    <span class="chip active" data-power="laser">🔴 Laser</span>
+    <span class="chip" data-power="ice">🧊 Ice</span>
+    <span class="chip" data-power="fire">🔥 Fire</span>
+    <span class="chip" data-power="invis">🫥 Invisible</span>
+    <span class="chip" data-power="karate">🥋 Karate</span>
+    <button id="act">Use (Space)</button>
+    <button id="startBtn">Start</button>
+  </div>
+  <canvas id="game" width="860" height="520"></canvas>
+<script>
+const c=document.getElementById('game');
+const ctx=c.getContext('2d');
+const hpYou=document.getElementById('hpYou');
+const hpE=document.getElementById('hpE');
+const startBtn=document.getElementById('startBtn');
+
+// --- Speeds
+const playerBaseSpeed=0.3;      // px/ms
+const enemyBaseSpeed =0.12;     // px/ms
+const projectileSpeed =0.12;    // px/ms for laser & fire
+
+// --- Game state
+let started=false, running=false;
+let startAt=0; const START_GRACE=1500;
+let lastAnim=0;
+
+const powers=['laser','ice','fire','invis','karate'];
+let powerIndex=0; let currentPower=powers[powerIndex];
+
+const player={x:100,y:300,w:44,h:64,color:'#4af',hp:100,face:1,inv:false,invT:0,speed:playerBaseSpeed,nextHitAt:0,clickTarget:null};
+const enemy ={x:680,y:300,w:54,h:74,color:'#000',hp:100,face:-1,fxFreeze:0,burnT:0,speed:enemyBaseSpeed};
+
+let projectiles=[]; // {type,x,y,vx,vy,ttl,beamLen}
+
+// --- Input
+const keys={};
+window.addEventListener('keydown',e=>{
+  if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' ','0','w','a','s','d','W','A','S','D'].includes(e.key)) e.preventDefault();
+  keys[e.key]=true;
+  if(e.key===' ' && started && running) activatePower();
+  if(e.key==='0') cyclePower();
+});
+window.addEventListener('keyup',e=>{ keys[e.key]=false; });
+
+function cyclePower(){
+  powerIndex=(powerIndex+1)%powers.length;
+  currentPower=powers[powerIndex];
+  document.querySelectorAll('.chip').forEach((x,i)=>x.classList.toggle('active', i===powerIndex));
+}
+
+// Power chips
+for(const ch of document.querySelectorAll('.chip')){
+  ch.addEventListener('click',()=>{
+    document.querySelectorAll('.chip').forEach(x=>x.classList.remove('active'));
+    ch.classList.add('active');
+    currentPower=ch.dataset.power; powerIndex=powers.indexOf(currentPower);
+  });
+}
+
+document.getElementById('act').addEventListener('click',()=>{ if(started && running) activatePower(); });
+startBtn.addEventListener('click',()=>{ reset(true); });
+
+// Click-to-move
+function setClickTarget(ev){
+  const rect=c.getBoundingClientRect();
+  const x=(ev.clientX-rect.left)*(c.width/rect.width);
+  const y=(ev.clientY-rect.top)*(c.height/rect.height);
+  player.clickTarget={x,y};
+}
+c.addEventListener('mousedown',e=>{ if(started && running) setClickTarget(e); });
+c.addEventListener('touchstart',e=>{ if(!(started&&running)) return; const t=e.touches[0]; if(t){ setClickTarget(t); }});
+
+// --- Helpers
+function clamp(v,min,max){ return Math.max(min,Math.min(max,v)); }
+function rectsOverlap(a,b){ return !(a.x+a.w<b.x||a.x>b.x+b.w||a.y+a.h<b.y||a.y> b.y+b.h); }
+function overlayMsg(msg){
+  ctx.save(); ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(0,0,c.width,c.height); ctx.restore();
+  ctx.fillStyle='#fff'; ctx.font='bold 28px system-ui'; ctx.textAlign='center'; ctx.fillText(msg, c.width/2, c.height/2);
+}
+
+// --- Draw
+function draw(){
+  ctx.clearRect(0,0,c.width,c.height);
+  // background
+  ctx.fillStyle='#141416'; ctx.fillRect(0,0,c.width,c.height);
+  ctx.strokeStyle='#0b0b0d'; ctx.setLineDash([6,10]); ctx.beginPath(); for(let y=60;y<c.height;y+=40){ctx.moveTo(0,y);ctx.lineTo(c.width,y);} ctx.stroke(); ctx.setLineDash([]);
+  // dog stickers
+  ctx.font='18px system-ui'; ctx.globalAlpha=.8; const dogs=['🐕','🐕‍🦺','🐶']; for(let i=0;i<8;i++){ ctx.fillText(dogs[i%3], 40+i*95, 40+(i%2)*28); } ctx.globalAlpha=1;
+
+  // entities
+  drawCharacter(player,'YOU','#4af');
+  drawVoldemort(enemy);
+
+  // projectiles
+  for(const p of projectiles){
+    if(p.type==='laser'){
+      const d = Math.hypot(p.vx,p.vy)||1; const ux=p.vx/d, uy=p.vy/d; const L=p.beamLen;
+      ctx.strokeStyle = 'rgba(239,68,68,.9)'; ctx.lineWidth = 2 + Math.sin(performance.now()/60)*0.7;
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + ux*L, p.y + uy*L); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + ux*L*0.9, p.y + uy*L*0.9); ctx.stroke();
+    } else if(p.type==='fire'){
+      ctx.fillStyle='orange'; ctx.beginPath(); ctx.arc(p.x,p.y,7,0,Math.PI*2); ctx.fill();
+    } else if(p.type==='karate'){
+      ctx.strokeStyle='#fff'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(p.x-6,p.y); ctx.lineTo(p.x+6,p.y); ctx.stroke();
+    }
+  }
+
+  if(!started){ overlayMsg('Click Start to Play'); }
+}
+
+function drawCharacter(o,label,base){
+  ctx.save();
+  ctx.fillStyle=base; ctx.fillRect(o.x,o.y,o.w,o.h);
+  ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.strokeRect(o.x,o.y,o.w,o.h);
+  // head
+  ctx.fillStyle='#ffd166'; ctx.fillRect(o.x+o.w/2-8,o.y-12,16,12);
+  // label
+  ctx.fillStyle='#fff'; ctx.font='14px system-ui'; ctx.textAlign='center'; ctx.fillText(label,o.x+o.w/2,o.y-16);
+  // inv shimmer
+  if(o.inv){ ctx.strokeStyle='rgba(255,255,255,.8)'; ctx.strokeRect(o.x-3,o.y-15,o.w+6,o.h+18); }
+  ctx.restore();
+}
+
+function drawVoldemort(e){
+  ctx.save();
+  ctx.fillStyle='#0a0a0b'; ctx.fillRect(e.x,e.y,e.w,e.h);
+  ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.strokeRect(e.x,e.y,e.w,e.h);
+  ctx.fillStyle='#e5e7eb'; ctx.fillRect(e.x+e.w/2-10,e.y-14,20,14);
+  ctx.fillStyle='#111'; ctx.fillRect(e.x+e.w/2-6,e.y-8,3,2); ctx.fillRect(e.x+e.w/2+3,e.y-8,3,2);
+  ctx.strokeStyle='#111'; ctx.beginPath(); ctx.arc(e.x+e.w/2,e.y-3,5,0,Math.PI); ctx.stroke();
+  ctx.fillStyle='#e11d48'; ctx.beginPath(); for(let i=0;i<6;i++){ const ang=i*Math.PI/3; const px=e.x+14+Math.cos(ang)*6; const py=e.y+16+Math.sin(ang)*6; ctx.ellipse(px,py,4,2,ang,0,Math.PI*2); } ctx.fill();
+  ctx.fillStyle='#16a34a'; ctx.fillRect(e.x+14, e.y+20, 2, 6);
+  ctx.fillStyle='#fff'; ctx.font='14px system-ui'; ctx.textAlign='center'; ctx.fillText('VOLDEMORT', e.x+e.w/2, e.y-16);
+  if(e.fxFreeze>0){ ctx.fillStyle='rgba(59,130,246,.25)'; ctx.fillRect(e.x-3,e.y-15,e.w+6,e.h+18); }
+  ctx.restore();
+}
+
+// --- Update
+function update(dt){
+  draw();
+  if(!started) return; if(!running) return;
+  const now=performance.now();
+
+  // movement
+  const left = keys['ArrowLeft']||keys['a']||keys['A'];
+  const right= keys['ArrowRight']||keys['d']||keys['D'];
+  const up   = keys['ArrowUp']||keys['w']||keys['W'];
+  const down = keys['ArrowDown']||keys['s']||keys['S'];
+  let vx=(right?1:0)-(left?1:0), vy=(down?1:0)-(up?1:0);
+  if(player.clickTarget){
+    const dx=player.clickTarget.x-(player.x+player.w/2);
+    const dy=player.clickTarget.y-(player.y+player.h/2);
+    const d=Math.hypot(dx,dy);
+    if(d<6){ player.clickTarget=null; }
+    else { vx=dx/d; vy=dy/d; }
+  }
+  const mag=Math.hypot(vx,vy)||1; player.x+= (vx/mag)*player.speed*dt; player.y+= (vy/mag)*player.speed*dt;
+  player.x=clamp(player.x,10,c.width-10-player.w); player.y=clamp(player.y,40,c.height-10-player.h);
+  if(vx!==0) player.face = vx>0?1:-1;
+
+  // inv timer
+  if(player.inv){ player.invT-=dt; if(player.invT<=0){ player.inv=false; }}
+
+  // enemy chase
+  if(enemy.fxFreeze>0){ enemy.fxFreeze-=dt; }
+  else {
+    const dx=(player.x-enemy.x), dy=(player.y-enemy.y); const d=Math.hypot(dx,dy)||1;
+    enemy.x += (dx/d) * enemy.speed * dt;
+    enemy.y += (dy/d) * enemy.speed * dt;
+  }
+  enemy.x=clamp(enemy.x,10,c.width-10-enemy.w); enemy.y=clamp(enemy.y,40,c.height-10-enemy.h);
+
+  // collision damage
+  if(rectsOverlap(player,enemy)){
+    if(now-startAt>START_GRACE && now>=player.nextHitAt && !player.inv){
+      damagePlayer(8); player.nextHitAt = now + 600;
+    }
+  }
+
+  // projectiles
+  for(let i=projectiles.length-1;i>=0;i--){
+    const p=projectiles[i]; p.ttl-=dt; if(p.ttl<=0){ projectiles.splice(i,1); continue; }
+    p.x+=p.vx*dt; p.y+=p.vy*dt;
+    if(p.type==='laser'){
+      const dSeg=10; const d=Math.hypot(p.vx,p.vy)||1; const ux=p.vx/d, uy=p.vy/d; const L=p.beamLen;
+      for(let s=0;s<=L; s+=dSeg){
+        const px=p.x+ux*s, py=p.y+uy*s;
+        if(px>enemy.x && px<enemy.x+enemy.w && py>enemy.y && py<enemy.y+enemy.h){ damageEnemy(4); break; }
+      }
+    } else if(p.type==='fire'){
+      if(p.x>enemy.x && p.x<enemy.x+enemy.w && p.y>enemy.y && p.y<enemy.y+enemy.h){ damageEnemy(6); enemy.burnT=Math.min(enemy.burnT+800,2500); projectiles.splice(i,1); }
+    } else if(p.type==='karate'){
+      if(p.x>enemy.x-6 && p.x<enemy.x+enemy.w+6 && p.y>enemy.y && p.y<enemy.y+enemy.h){ damageEnemy(8); projectiles.splice(i,1);} 
+    }
+  }
+  if(enemy.burnT>0){ enemy.burnT-=dt; if(Math.random()<0.03) damageEnemy(0.7); }
+
+  // HUD
+  hpYou.style.width=Math.max(0,player.hp)+'%';
+  hpE.style.width=Math.max(0,enemy.hp)+'%';
+
+  // end
+  if(player.hp<=0){ player.hp=0; running=false; overlayMsg('Lost! Try again!'); return; }
+  if(enemy.hp<=0){ enemy.hp=0; running=false; overlayMsg('You Win!'); return; }
+}
+
+function damageEnemy(d){ enemy.hp=Math.max(0, enemy.hp - d); }
+function damagePlayer(d){ player.hp=Math.max(0, player.hp - d); }
+
+// --- Powers (use projectileSpeed)
+function activatePower(){
+  if(!running) return;
+  switch(currentPower){
+    case 'laser':{
+      const sx=player.x+player.w/2, sy=player.y+player.h/2;
+      const ex=enemy.x+enemy.w/2, ey=enemy.y+enemy.h/2;
+      const dx=ex-sx, dy=ey-sy, d=Math.hypot(dx,dy)||1;
+      const vx=(dx/d)*projectileSpeed, vy=(dy/d)*projectileSpeed;
+      projectiles.push({type:'laser',x:sx,y:sy,vx,vy,ttl:300,beamLen:140});
+      break;}
+    case 'ice':{
+      const cx=player.x+player.w/2, cy=player.y+player.h/2; const ex=enemy.x+enemy.w/2, ey=enemy.y+enemy.h/2;
+      const d=Math.hypot(ex-cx,ey-cy); if(d<200){ enemy.fxFreeze=Math.max(enemy.fxFreeze,1200); damageEnemy(3); }
+      break;}
+    case 'fire':{
+      const sx=player.x+player.w/2, sy=player.y+player.h/2;
+      const ex=enemy.x+enemy.w/2, ey=enemy.y+enemy.h/2; const dx=ex-sx, dy=ey-sy, d=Math.hypot(dx,dy)||1;
+      const vx=(dx/d)*projectileSpeed, vy=(dy/d)*projectileSpeed;
+      projectiles.push({type:'fire',x:sx,y:sy,vx,vy,ttl:3000});
+      break;}
+    case 'invis':{ player.inv=true; player.invT=1000; break; }
+    case 'karate':{
+      const sx=player.x+player.w/2, sy=player.y+player.h/2;
+      const ex=enemy.x+enemy.w/2, ey=enemy.y+enemy.h/2; const dx=ex-sx, dy=ey-sy, d=Math.hypot(dx,dy)||1;
+      const reach=Math.min(40,d); const jx=sx+(dx/d)*reach, jy=sy+(dy/d)*reach;
+      projectiles.push({type:'karate',x:jx,y:jy,vx:0,vy:0,ttl:160});
+      break;}
+  }
+}
+
+function reset(userPressedStart=false){
+  // positions & stats
+  player.x=100; player.y=300; player.hp=100; player.inv=false; player.invT=0; player.nextHitAt=0; player.clickTarget=null; player.speed=playerBaseSpeed;
+  enemy.x=680; enemy.y=300; enemy.hp=100; enemy.fxFreeze=0; enemy.burnT=0; enemy.speed=enemyBaseSpeed;
+  projectiles.length=0;
+  hpYou.style.width='100%'; hpE.style.width='100%';
+  if(userPressedStart){ started=true; running=true; startAt=performance.now(); startBtn.textContent='Restart'; }
+  else { started=false; running=false; startBtn.textContent='Start'; }
+}
+
+window.addEventListener('keydown',e=>{ if(e.key==='r'||e.key==='R'){ reset(true); }});
+
+function loop(ts){ if(!lastAnim) lastAnim=ts; const dt=Math.min(32, ts-lastAnim); lastAnim=ts; update(dt); requestAnimationFrame(loop); }
+reset(false); // initial state
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
